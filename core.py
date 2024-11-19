@@ -7,6 +7,7 @@ from send import NotificationSender
 import os
 from pymongo import MongoClient
 import cfscrape
+import shutil
 
 scraper = cfscrape.create_scraper()  # returns a CloudflareScraper instance
 
@@ -29,6 +30,10 @@ class ForumMonitor:
     # 加载配置文件
     def load_config(self):
         try:
+            # 检查配置文件是否存在
+            if not os.path.exists(self.config_path):
+                print(f"{self.config_path} 不存在，复制到 {self.config_path}")
+                shutil.copy('example.json', self.config_path)
             with open(self.config_path, 'r') as f:
                 self.config = json.load(f)['config']
                 self.notifier = NotificationSender(self.config_path)  # 创建通知发送器

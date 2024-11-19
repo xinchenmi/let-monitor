@@ -2,7 +2,7 @@
 
 一个基于 Workers AI 的 LowEndTalk 新帖/评论监控。获取到信息后，交由 AI 进行翻译、总结、筛选，并推送到 Telegram 等不同渠道。
 
-DEMO：
+DEMO：https://t.me/letleblessub
 
 ## 功能
 
