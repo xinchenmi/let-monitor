@@ -26,6 +26,13 @@ class ForumMonitor:
         self.db = self.mongo_client['forum_monitor']  # 使用数据库 'forum_monitor'
         self.threads_collection = self.db['threads']  # 线程集合
         self.comments_collection = self.db['comments']  # 评论集合
+        try:
+            # 创建索引。如果索引已经存在，MongoDB 会自动跳过创建，无需担心重复。
+            self.threads_collection.create_index('link', unique=True)
+            self.comments_collection.create_index('comment_id', unique=True)
+        except Exception as e:
+            print(e)
+
 
     # 加载配置文件
     def load_config(self):
@@ -87,12 +94,12 @@ class ForumMonitor:
     def parse_rss(self, rss_feed):
         soup = BeautifulSoup(rss_feed, 'xml')
         items = soup.find_all('item')
-        # 只看前 10 个
-        for item in items[:10]:
+        # 只看前 3 个
+        for item in items[:3]:
             # print(item)
             title = item.find('title').text
             link = item.find('link').text
-            description = item.find('description').text
+            description = BeautifulSoup(item.find('description').text).text
             pub_date = item.find('pubDate').text
             creator = item.find('dc:creator').text
             # 检查是否已经有该线程
@@ -128,11 +135,13 @@ class ForumMonitor:
                     
                     # 创建消息内容
                     message = (
+                        "新促销\n"
                         f"标题：{title}\n"
                         f"作者：{creator}\n"  # 如果有作者信息，可替换 '未知' 为实际值
-                        f"发布时间：{formatted_pub_date}\n"
-                        f"{summary}\n"
-                        f"链接：{link}"
+                        f"发布时间：{formatted_pub_date}\n\n"
+                        f"{description[:200]}...\n\n"
+                        f"{summary}\n\n"
+                        f"{link}"
                     )
 
                     self.notifier.send_message(message)
@@ -199,6 +208,9 @@ class ForumMonitor:
             created_at = comment.find('time')['datetime']
             author_url = comment.find('a', class_='Username')['href']
             
+            if not author == thread_info['creator'] or comment.find('div',class_="QuoteText"):
+                continue
+
             existing_comment = self.comments_collection.find_one({'comment_id': comment_id})
 
             if not existing_comment:
@@ -239,10 +251,12 @@ class ForumMonitor:
 
                         # 创建消息内容
                         message_ = (
+                            "新评论\n"
                             f"作者：{author}\n"  # 如果有作者信息，可替换 '未知' 为实际值
-                            f"发布时间：{formatted_pub_date}\n"
-                            f"{ai_response}\n"
-                            f"链接：https://lowendtalk.com/discussion/comment/{comment_id}/#Comment_{comment_id}"
+                            f"发布时间：{formatted_pub_date}\n\n"
+                            f"{message[:200]}...\n"
+                            f"{ai_response[:200]}...\n\n"
+                            f"https://lowendtalk.com/discussion/comment/{comment_id}/#Comment_{comment_id}"
                         )
 
                         self.notifier.send_message(message_)
