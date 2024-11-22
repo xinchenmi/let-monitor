@@ -77,21 +77,120 @@ class ForumMonitor:
         # print(output)
         return output['result']['response']
 
-    # 检查 RSS
-    def check_rss(self, url):
-        print(f"正在检查 RSS: {url}")
-        try:
-            response = scraper.get(url)
+
+
+    def handle_thread(self, thread_data):
+        # 检查是否已经有该线程
+        existing_thread = self.threads_collection.find_one({'link': thread_data['link']})
+
+        if not existing_thread:
+            # 存储 RSS 线程到 MongoDB
+
+            self.threads_collection.insert_one(thread_data)  # 仅当线程不存在时插入
+
+            print(f"线程已存储: {thread_data['title']}, 链接: {thread_data['link']}")
+
+            # 解析 pub_date 为 datetime 对象
+            time_diff = datetime.utcnow() - thread_data['pub_data']
+
+            # 如果文章发布时间在当前时间的一天内，则发送通知
+            if time_diff.total_seconds() <= 24 * 60 * 60:  # 24小时以内
+                # 格式化发布时间为所需格式
+                formatted_pub_date = thread_data['pub_data'].strftime("%Y/%m/%d %H:%M")
+                
+                # 生成文章概要
+                summary = self.get_summarize_from_ai(thread_data['description'])
+                
+                # 创建消息内容
+                message = (
+                    "新促销\n"
+                    f"标题：{thread_data['title']}\n"
+                    f"作者：{thread_data['creator']}\n"  # 如果有作者信息，可替换 '未知' 为实际值
+                    f"发布时间：{formatted_pub_date}\n\n"
+                    f"{thread_data['description'][:200]}...\n\n"
+                    f"{summary}\n\n"
+                    f"{thread_data['link']}"
+                )
+
+                self.notifier.send_message(message)
+        else:
+            # print(f"线程已存在: {link}")
+            pass
+
+    # 获取线程所有页面的评论
+    def fetch_comments(self, thread_data):
+        thread_info = self.threads_collection.find_one({'link': thread_data['link']})
+        if thread_info:
+            last_page = thread_info.get('last_page', 1)
+        while True:
+            # 不同类型可能要考虑不同构建
+            if thread_data['cate'] == 'let':
+                page_url = f"{thread_data['link']})/p{last_page}"  # 拼接分页 URL
+
+            response = scraper.get(page_url)
             if response.status_code == 200:
-                rss_feed = response.text
-                self.parse_rss(rss_feed)
+                # print(f"抓取页面: {page_url} 成功")
+                page_content = response.text
+                if thread_data['cate'] == 'let':
+                    self.parse_let_comment(page_content, thread_data)
+                    
+                last_page += 1
+                time.sleep(2)  # 可以适当延时防止过于频繁的请求
             else:
-                print(f"无法获取 RSS 数据: {response.status_code}")
-        except Exception as e:
-            print(f"获取 RSS 出错: {e}")
+                # print(f"已获取到最终一页, 共 {last_page-1} 页")
+                # 更新 MongoDB 中该线程的 last_page
+                self.threads_collection.update_one(
+                    {'link': thread_data['link']},
+                    {'$set': {'last_page': last_page-1}}
+                )
+                break  # 如果没有更多页面，则停止抓取
+
+    def handle_comment(self, comment_data, thread_data):
+        existing_comment = self.comments_collection.find_one({'comment_id': comment_data['comment_id']})
+    
+        if not existing_comment:
+            # 存储评论到 MongoDB，使用 comment_id 确保唯一性
+            self.comments_collection.update_one(
+                {'comment_id': comment_data['comment_id']},  # 使用 comment_id 作为唯一标识符
+                {'$set': comment_data},
+                upsert=True  # 如果该评论不存在则插入，否则更新
+            )
+
+            time_diff = datetime.utcnow() - comment_data['created_at']
+            # 如果文章发布时间在当前时间的一天内，则发送通知
+            if time_diff.total_seconds() <= 24 * 60 * 60 and comment_data['author'] == thread_data['creator']:  # 24小时以内
+                ai_response = self.get_filter_from_ai(comment_data['message'])
+                if not "FALSE" in ai_response:
+                    # 格式化发布时间为所需格式
+                    formatted_pub_date = comment_data['created_at'].strftime("%Y/%m/%d %H:%M")
+    
+                    # 创建消息内容
+                    message = (
+                        "新评论\n"
+                        f"作者：{comment_data['author']}\n"  # 如果有作者信息，可替换 '未知' 为实际值
+                        f"发布时间：{formatted_pub_date}\n\n"
+                        f"{comment_data['message'][:200]}...\n"
+                        f"{ai_response[:200]}...\n\n"
+                        f"{comment_data['url']}"
+                    )
+    
+                    self.notifier.send_message(message)
+                else:
+                    print(f'AI skip {comment_data["message"]}')
+
+    # 检查 RSS
+    def check_let(self, url):
+        print(f"正在检查 LET: {url}")
+        response = scraper.get(url)
+        if response.status_code == 200:
+            rss_feed = response.text
+            self.parse_let(rss_feed)
+        else:
+            print(f"无法获取 LET 数据: {response.status_code}")
+ 
 
     # 解析 RSS 内容
-    def parse_rss(self, rss_feed):
+    def parse_let(self, rss_feed):
         soup = BeautifulSoup(rss_feed, 'xml')
         items = soup.find_all('item')
         # 只看前 3 个
@@ -99,98 +198,28 @@ class ForumMonitor:
             # print(item)
             title = item.find('title').text
             link = item.find('link').text
-            description = BeautifulSoup(item.find('description').text).text
+            description = BeautifulSoup(item.find('description').text,'lxml').text
             pub_date = item.find('pubDate').text
             creator = item.find('dc:creator').text
-            # 检查是否已经有该线程
-            existing_thread = self.threads_collection.find_one({'link': link})
 
-            if not existing_thread:
-                # 存储 RSS 线程到 MongoDB
-                thread_data = {
-                    'title': title,
-                    'link': link,
-                    'description': description,
-                    'pub_date': pub_date,
-                    'created_at': datetime.utcnow(),
-                    'creator': creator,
-                    'last_page': 1  # 默认从第一页开始抓取
-                }
-                self.threads_collection.insert_one(thread_data)  # 仅当线程不存在时插入
+            thread_data = {
+                'cate': 'let',
+                'title': title,
+                'link': link,
+                'description': description,
+                'pub_date': datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S +0000"),
+                'created_at': datetime.utcnow(),
+                'creator': creator,
+                'last_page': 1  # 默认从第一页开始抓取
+            }
 
-                print(f"线程已存储: {title}, 链接: {link}")
- 
-                # 解析 pub_date 为 datetime 对象
-                pub_datetime = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S +0000")
-                current_time = datetime.utcnow()
-                time_diff = current_time - pub_datetime
+            self.handle_thread(thread_data)
 
-                # 如果文章发布时间在当前时间的一天内，则发送通知
-                if time_diff.total_seconds() <= 24 * 60 * 60:  # 24小时以内
-                    # 格式化发布时间为所需格式
-                    formatted_pub_date = pub_datetime.strftime("%Y/%m/%d %H:%M")
-                    
-                    # 生成文章概要
-                    summary = self.get_summarize_from_ai(description)
-                    
-                    # 创建消息内容
-                    message = (
-                        "新促销\n"
-                        f"标题：{title}\n"
-                        f"作者：{creator}\n"  # 如果有作者信息，可替换 '未知' 为实际值
-                        f"发布时间：{formatted_pub_date}\n\n"
-                        f"{description[:200]}...\n\n"
-                        f"{summary}\n\n"
-                        f"{link}"
-                    )
-
-                    self.notifier.send_message(message)
-            else:
-                # print(f"线程已存在: {link}")
-                pass
-
-            # 开始抓取这个线程的所有页面
-            self.check_page(link)
-
-    # 获取页面信息
-    def check_page(self, thread_url):
-        # print(f"正在线程页面: {thread_url}")
-        try:
-            # 获取当前线程的最后一页数据
-            thread_info = self.threads_collection.find_one({'link': thread_url})
-            if thread_info:
-                last_page = thread_info.get('last_page', 1)
-                # print(f"上次抓取的页面是: {last_page}")
-                # 根据当前最后一页抓取接下来的页面
-                self.fetch_all_pages(thread_url, last_page, thread_info)
-            else:
-                print(f"未找到该线程信息: {thread_url}")
-        except Exception as e:
-            print(f"获取页面出错: {e}")
-
-    # 获取线程所有页面的评论
-    def fetch_all_pages(self, thread_url, last_page, thread_info):
-        # 以某种方式获取所有分页的 URL
-        while True:
-            page_url = f"{thread_url}/p{last_page}"  # 拼接分页 URL
-            response = scraper.get(page_url)
-            if response.status_code == 200:
-                # print(f"抓取页面: {page_url} 成功")
-                page_content = response.text
-                self.parse_page(page_content, page_url, thread_info)
-                last_page += 1
-                time.sleep(2)  # 可以适当延时防止过于频繁的请求
-            else:
-                # print(f"已获取到最终一页, 共 {last_page-1} 页")
-                # 更新 MongoDB 中该线程的 last_page
-                self.threads_collection.update_one(
-                    {'link': thread_url},
-                    {'$set': {'last_page': last_page-1}}
-                )
-                break  # 如果没有更多页面，则停止抓取
+            # 开始抓取
+            self.fetch_comments(thread_data)
             
     # 解析页面信息
-    def parse_page(self, page_content, url, thread_info):
+    def parse_let_comment(self, page_content, thread_data):
         soup = BeautifulSoup(page_content, 'html.parser')
         # 获取所有评论
         comments = soup.find_all('li', class_='ItemComment')
@@ -198,6 +227,7 @@ class ForumMonitor:
             # 通过 ID 获取评论唯一标识
             comment_id = comment.get('id')
             if not comment_id:
+                print('nocommentid')
                 continue  # 如果没有 id，则跳过此评论
             
             comment_id = comment_id.split('_')[1]  # 提取 id 中的数字部分
@@ -206,79 +236,45 @@ class ForumMonitor:
             author = comment.find('a', class_='Username').text
             message = comment.find('div', class_='Message').text.strip()
             created_at = comment.find('time')['datetime']
-            author_url = comment.find('a', class_='Username')['href']
             
-            if not author == thread_info['creator'] or comment.find('div',class_="QuoteText"):
+            if not author == thread_data['creator'] or comment.find('div',class_="QuoteText"):
                 continue
 
-            existing_comment = self.comments_collection.find_one({'comment_id': comment_id})
-
-            if not existing_comment:
-                comment_data = {
-                    'comment_id': comment_id,  # 使用 comment_id 作为唯一标识符
-                    'thread_url': url,
+            comment_data = {
+                    'comment_id': f'{thread_data["cate"]}_{comment_id}',  # 使用 comment_id 作为唯一标识符
+                    'thread_url': thread_data['link'],
                     'author': author,
                     # 'message': message,
                     # 优化存储
                     'message': message[:200],
                     'created_at': datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%S+00:00"),
-                    'author_url': author_url,
-                    'created_at_recorded': datetime.utcnow()
+                    'created_at_recorded': datetime.utcnow(),
+                    'url': f"https://lowendtalk.com/discussion/comment/{comment_id}/#Comment_{comment_id}"
                 }
+            
+            self.handle_comment(comment_data, thread_data)
 
-                # 存储评论到 MongoDB，使用 comment_id 确保唯一性
-                self.comments_collection.update_one(
-                    {'comment_id': comment_id},  # 使用 comment_id 作为唯一标识符
-                    {'$set': comment_data},
-                    upsert=True  # 如果该评论不存在则插入，否则更新
-                )
-                # print(f"评论已存储: 作者: {author}, 内容: {message[:30]}...")
-                
-                # 根据关键字发送通知
-                # keyword = self.config.get('config', {}).get('keyword', '')
-                # if keyword.lower() in message.lower():
-                #     self.notifier.send_message(f"新评论匹配关键字 '{keyword}':\n{message}")
-    
-                created_datetime = datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%S+00:00")
-                current_time = datetime.utcnow()
-                time_diff = current_time - created_datetime
-                # 如果文章发布时间在当前时间的一天内，则发送通知
-                if time_diff.total_seconds() <= 24 * 60 * 60 and author == thread_info['creator']:  # 24小时以内
-                    ai_response = self.get_filter_from_ai(message)
-                    if not  "FALSE" in ai_response:
-                        # 格式化发布时间为所需格式
-                        formatted_pub_date = created_datetime.strftime("%Y/%m/%d %H:%M")
-
-                        # 创建消息内容
-                        message_ = (
-                            "新评论\n"
-                            f"作者：{author}\n"  # 如果有作者信息，可替换 '未知' 为实际值
-                            f"发布时间：{formatted_pub_date}\n\n"
-                            f"{message[:200]}...\n"
-                            f"{ai_response[:200]}...\n\n"
-                            f"https://lowendtalk.com/discussion/comment/{comment_id}/#Comment_{comment_id}"
-                        )
-
-                        self.notifier.send_message(message_)
-                    else:
-                        print(f'AI skip {message}')
-                    # if  and not 'thank you' in message.lower():
-                    #     self.notifier.send_message(f"商家新评论 '{author}':\n{message[:200]}....\n")
-    
     # 监控主循环
     def start_monitoring(self):
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始监控...")
         # rss_url = self.config.get('rss_url')
-        rss_url = "https://lowendtalk.com/categories/offers/feed.rss"
+        let_url = "https://lowendtalk.com/categories/offers/feed.rss"
         frequency = self.config.get('frequency', 600)  # 默认每10分钟检测一次
         
+        debug = True
+
         while True:
-            try:
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始遍历...")
-                self.check_rss(rss_url)  # 检查 RSS
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 遍历完成...")
-            except Exception as e:
-                print(f"检测过程出现错误: {e}")
+            if debug:
+                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始遍历...")
+                    self.check_let(let_url)  # 检查 RSS
+                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 遍历完成...")
+            else:
+                try:
+                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始遍历...")
+                    self.check_let(let_url)  # 检查 RSS
+                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 遍历完成...")
+                except Exception as e:
+                    print(f"检测过程出现错误: {e}")
             time.sleep(frequency)
 
     # 外部重载配置方法
