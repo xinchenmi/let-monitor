@@ -64,7 +64,7 @@ class ForumMonitor:
 
         output = self.workers_ai_run(self.config['model'], inputs) # "@cf/qwen/qwen1.5-14b-chat-awq"
         # print(output)
-        return output['result']['response']
+        return output['result']['response'].split('END')[0]
 
     # 用AI判断评论是否值得推送
     def get_filter_from_ai(self, description):
@@ -74,8 +74,8 @@ class ForumMonitor:
         ]
 
         output = self.workers_ai_run(self.config['model'], inputs) # "@cf/qwen/qwen1.5-14b-chat-awq"
-        # print(output)
-        return output['result']['response']
+        print(output)
+        return output['result']['response'].split('END')[0]
 
 
 
@@ -91,19 +91,19 @@ class ForumMonitor:
             print(f"线程已存储: {thread_data['title']}, 链接: {thread_data['link']}")
 
             # 解析 pub_date 为 datetime 对象
-            time_diff = datetime.utcnow() - thread_data['pub_data']
+            time_diff = datetime.utcnow() - thread_data['pub_date']
 
             # 如果文章发布时间在当前时间的一天内，则发送通知
             if time_diff.total_seconds() <= 24 * 60 * 60:  # 24小时以内
                 # 格式化发布时间为所需格式
-                formatted_pub_date = thread_data['pub_data'].strftime("%Y/%m/%d %H:%M")
+                formatted_pub_date = thread_data['pub_date'].strftime("%Y/%m/%d %H:%M")
                 
                 # 生成文章概要
                 summary = self.get_summarize_from_ai(thread_data['description'])
                 
                 # 创建消息内容
                 message = (
-                    "新促销\n"
+                    f"{thread_data['cate'].upper()} 新促销\n"
                     f"标题：{thread_data['title']}\n"
                     f"作者：{thread_data['creator']}\n"  # 如果有作者信息，可替换 '未知' 为实际值
                     f"发布时间：{formatted_pub_date}\n\n"
@@ -124,15 +124,15 @@ class ForumMonitor:
             last_page = thread_info.get('last_page', 1)
         while True:
             # 不同类型可能要考虑不同构建
-            if thread_data['cate'] == 'let':
+            if thread_data['cate'] == 'let' or thread_data['cate'] == 'les':
                 page_url = f"{thread_data['link']})/p{last_page}"  # 拼接分页 URL
 
             response = scraper.get(page_url)
             if response.status_code == 200:
                 # print(f"抓取页面: {page_url} 成功")
                 page_content = response.text
-                if thread_data['cate'] == 'let':
-                    self.parse_let_comment(page_content, thread_data)
+                if thread_data['cate'] == 'let' or thread_data['cate'] == 'les':
+                    self.parse_let_les_comment(page_content, thread_data)
                     
                 last_page += 1
                 time.sleep(2)  # 可以适当延时防止过于频繁的请求
@@ -159,14 +159,16 @@ class ForumMonitor:
             time_diff = datetime.utcnow() - comment_data['created_at']
             # 如果文章发布时间在当前时间的一天内，则发送通知
             if time_diff.total_seconds() <= 24 * 60 * 60 and comment_data['author'] == thread_data['creator']:  # 24小时以内
+                print(comment_data['message'])
                 ai_response = self.get_filter_from_ai(comment_data['message'])
+                print(ai_response)
                 if not "FALSE" in ai_response:
                     # 格式化发布时间为所需格式
                     formatted_pub_date = comment_data['created_at'].strftime("%Y/%m/%d %H:%M")
     
                     # 创建消息内容
                     message = (
-                        "新评论\n"
+                        f"{thread_data['cate'].upper()} 新评论\n"
                         f"作者：{comment_data['author']}\n"  # 如果有作者信息，可替换 '未知' 为实际值
                         f"发布时间：{formatted_pub_date}\n\n"
                         f"{comment_data['message'][:200]}...\n"
@@ -179,7 +181,7 @@ class ForumMonitor:
                     print(f'AI skip {comment_data["message"]}')
 
     # 检查 RSS
-    def check_let(self, url):
+    def check_let(self, url = "https://lowendtalk.com/categories/offers/feed.rss"):
         print(f"正在检查 LET: {url}")
         response = scraper.get(url)
         if response.status_code == 200:
@@ -219,7 +221,8 @@ class ForumMonitor:
             self.fetch_comments(thread_data)
             
     # 解析页面信息
-    def parse_let_comment(self, page_content, thread_data):
+    # 两个论坛的样式是一样的
+    def parse_let_les_comment(self, page_content, thread_data):
         soup = BeautifulSoup(page_content, 'html.parser')
         # 获取所有评论
         comments = soup.find_all('li', class_='ItemComment')
@@ -249,16 +252,55 @@ class ForumMonitor:
                     'message': message[:200],
                     'created_at': datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%S+00:00"),
                     'created_at_recorded': datetime.utcnow(),
-                    'url': f"https://lowendtalk.com/discussion/comment/{comment_id}/#Comment_{comment_id}"
+                    'url': f"https://lowendtalk.com/discussion/comment/{comment_id}/#Comment_{comment_id}" if thread_data['cate'] == 'let' else f"https://lowendspirit.com/discussion/comment/{comment_id}/#Comment_{comment_id}"
                 }
             
             self.handle_comment(comment_data, thread_data)
 
+    def check_les(self,url = 'https://lowendspirit.com/categories/offers'):
+        response = requests.get(url)
+        print(f"正在检查 LES: {url}")
+        if response.status_code == 200:
+            text = response.text
+            self.parse_les(text)
+        else:
+            print(f"无法获取 LES 数据: {response.status_code}")
+
+    def parse_les(self,text):
+        soup = BeautifulSoup(text, 'html.parser')
+        items = soup.find_all('li',class_='ItemDiscussion')
+
+        for item in items[:3]:
+            title = item.find('div', {'class': 'Title'}).find('a').text.strip()
+            creator = item.find('span', {'class': 'DiscussionAuthor'}).find('a').text.strip()
+            link = item.find('div', {'class': 'Title'}).find('a')['href']
+
+            response = requests.get(link)
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            discussion_div = soup.find('div', {'class': 'Discussion'})
+            content = discussion_div.find('div', {'class': 'Message userContent'}).text.strip()
+            publish_time = discussion_div.find('span', {'class': 'MItem DateCreated'}).find('time')['datetime']
+
+            thread_data = {
+                'cate': 'les',
+                'title': title,
+                'creator': creator,
+                'link': link,
+                'description': content,
+                'pub_date': datetime.strptime(publish_time, '%Y-%m-%dT%H:%M:%S%z').replace(tzinfo=None),
+                'create_at': datetime.utcnow(),
+                'last_page': 1
+            }
+
+            self.handle_thread(thread_data)
+
+            # 开始抓取
+            self.fetch_comments(thread_data)
+
     # 监控主循环
     def start_monitoring(self):
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始监控...")
-        # rss_url = self.config.get('rss_url')
-        let_url = "https://lowendtalk.com/categories/offers/feed.rss"
         frequency = self.config.get('frequency', 600)  # 默认每10分钟检测一次
         
         debug = True
@@ -266,12 +308,14 @@ class ForumMonitor:
         while True:
             if debug:
                     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始遍历...")
-                    self.check_let(let_url)  # 检查 RSS
+                    self.check_let()  # 检查 RSS
+                    self.check_les()
                     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 遍历完成...")
             else:
                 try:
                     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始遍历...")
-                    self.check_let(let_url)  # 检查 RSS
+                    self.check_let()  # 检查 RSS
+                    self.check_les()
                     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 遍历完成...")
                 except Exception as e:
                     print(f"检测过程出现错误: {e}")
