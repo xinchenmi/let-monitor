@@ -49,6 +49,15 @@
         .header-links a:hover {
             color: #007bff;
         }
+        .custom-threads {
+            margin-top: 30px;
+        }
+        .custom-threads .el-button {
+            margin-bottom: 10px;
+        }
+        .custom-threads .el-empty {
+            margin-top: 20px;
+        }
     </style>
 </head>
 <body>
@@ -74,22 +83,7 @@
                     <el-option label="微信 (息知)" value="wechat"></el-option>
                     <el-option label="自定义" value="custom"></el-option>
                 </el-select>
-            </el-form-item>
-
-            <template v-if="config.notice_type === 'telegram'">
-                <el-form-item label="Telegram Bot Token">
-                    <el-input v-model="config.telegrambot" placeholder="Telegram Bot Token"></el-input>
-                </el-form-item>
-                <el-form-item label="Telegram Chat ID">
-                    <el-input v-model="config.chat_id" placeholder="Telegram Chat ID"></el-input>
-                </el-form-item>
-            </template>
-
-            <template v-if="config.notice_type === 'wechat'">
-                <el-form-item label="息知 KEY">
-                    <el-input v-model="config.wechat_key" placeholder="XIZHI KEY"></el-input>
-                </el-form-item>
-            </template>
+@@ -93,71 +102,179 @@
 
             <template v-if="config.notice_type === 'custom'">
                 <el-form-item label="自定义 URL">
@@ -115,6 +109,59 @@
 
             <el-button type="primary" @click="updateConfig">保存配置</el-button>
         </el-form>
+
+        <div class="custom-threads">
+            <h2>自定义帖子监控</h2>
+            <p style="color:#6c757d;">在此添加需要监控的 LowEndTalk 帖子 URL，可选择仅监控特定作者或关闭 AI 筛选。</p>
+            <el-button type="primary" plain @click="addCustomThread">新增帖子</el-button>
+
+            <el-table v-if="config.custom_threads.length" :data="config.custom_threads" border style="margin-top: 20px;">
+                <el-table-column label="备注名称" min-width="160">
+                    <template #default="scope">
+                        <el-input v-model="scope.row.name" placeholder="可选备注"></el-input>
+                    </template>
+                </el-table-column>
+                <el-table-column label="帖子 URL" min-width="240">
+                    <template #default="scope">
+                        <el-input v-model="scope.row.url" placeholder="https://lowendtalk.com/discussion/..." clearable></el-input>
+                    </template>
+                </el-table-column>
+                <el-table-column label="监控范围" min-width="160">
+                    <template #default="scope">
+                        <el-switch
+                            v-model="scope.row.monitor_all_authors"
+                            active-text="全部评论"
+                            inactive-text="仅指定作者"
+                        ></el-switch>
+                    </template>
+                </el-table-column>
+                <el-table-column label="作者 (可选)" min-width="160">
+                    <template #default="scope">
+                        <el-input
+                            v-model="scope.row.author"
+                            :disabled="scope.row.monitor_all_authors"
+                            placeholder="支持多个作者，逗号分隔"
+                        ></el-input>
+                    </template>
+                </el-table-column>
+                <el-table-column label="AI 筛选" min-width="140">
+                    <template #default="scope">
+                        <el-switch
+                            v-model="scope.row.use_ai_filter"
+                            active-text="开启"
+                            inactive-text="关闭"
+                        ></el-switch>
+                    </template>
+                </el-table-column>
+                <el-table-column label="操作" width="120" align="center">
+                    <template #default="scope">
+                        <el-button type="danger" plain @click="removeCustomThread(scope.$index)">删除</el-button>
+                    </template>
+                </el-table-column>
+            </el-table>
+
+            <el-empty v-else description="暂无自定义帖子，请先添加"></el-empty>
+        </div>
     </div>
 
     <script src="https://unpkg.com/vue@3.2.47/dist/vue.global.js"></script>
@@ -137,21 +184,76 @@
                         cf_token: '',
                         model: '',
                         thread_prompt: '',
-                        filter_prompt: ''
+                        filter_prompt: '',
+                        custom_threads: []
                     }
                 };
             },
             methods: {
                 fetchConfig() {
                     axios.get('/api/config').then(response => {
-                        this.config = response.data;
+                        const incoming = response.data || {};
+                        const threads = Array.isArray(incoming.custom_threads) ? incoming.custom_threads : [];
+                        const normalizedThreads = threads.map(thread => {
+                            const monitorAll = thread.monitor_all_authors !== undefined ? !!thread.monitor_all_authors : !(thread.author);
+                            const useAi = thread.use_ai_filter !== undefined ? !!thread.use_ai_filter : true;
+                            return {
+                                name: thread.name || '',
+                                url: thread.url || '',
+                                author: thread.author || '',
+                                monitor_all_authors: monitorAll,
+                                use_ai_filter: useAi
+                            };
+                        });
+
+                        this.config = {
+                            ...this.config,
+                            ...incoming,
+                            custom_threads: normalizedThreads
+                        };
+                    }).catch(error => {
+                        console.error('加载配置失败', error);
                     });
                 },
                 updateConfig() {
-                    axios.post('/api/config', { config: this.config }).then(response => {
+                    const payload = JSON.parse(JSON.stringify(this.config));
+                    payload.custom_threads = (payload.custom_threads || [])
+                        .filter(thread => thread.url && thread.url.trim() !== '')
+                        .map(thread => {
+                            const sanitized = {
+                                name: thread.name || '',
+                                url: thread.url.trim(),
+                                monitor_all_authors: thread.monitor_all_authors !== undefined ? !!thread.monitor_all_authors : true,
+                                use_ai_filter: thread.use_ai_filter !== undefined ? !!thread.use_ai_filter : true
+                            };
+
+                            const authorValue = (thread.author || '').trim();
+                            if (!sanitized.monitor_all_authors && authorValue) {
+                                sanitized.author = authorValue;
+                            }
+
+                            return sanitized;
+                        });
+
+                    axios.post('/api/config', { config: payload }).then(response => {
                         alert(response.data.message);
                         this.fetchConfig();
+                    }).catch(error => {
+                        console.error('保存配置失败', error);
+                        alert('保存失败，请查看控制台日志。');
                     });
+                },
+                addCustomThread() {
+                    this.config.custom_threads.push({
+                        name: '',
+                        url: '',
+                        author: '',
+                        monitor_all_authors: true,
+                        use_ai_filter: true
+                    });
+                },
+                removeCustomThread(index) {
+                    this.config.custom_threads.splice(index, 1);
                 }
             },
             mounted() {
