@@ -15,7 +15,7 @@ scraper = cfscrape.create_scraper()  # returns a CloudflareScraper instance
 
 
 class ForumMonitor:
-   def __init__(self, config_path='data/config.json'):
+  def __init__(self, config_path='data/config.json'):
         self.config_path = config_path
         self.proxy_host = os.getenv("PROXY_HOST", None)  # 从环境变量读取代理配置
         self.mongo_host = os.getenv("MONGO_HOST", 'mongodb://localhost:27017/')  # 从环境变量读取代理配置
@@ -54,8 +54,12 @@ class ForumMonitor:
 
     def workers_ai_run(self, model, inputs):
         headers = {"Authorization": f"Bearer {self.config['cf_token']}"}
-        input = { "messages": inputs }
-        response = requests.post(f"https://api.cloudflare.com/client/v4/accounts/{self.config['cf_account_id']}/ai/run/{model}", headers=headers, json=input)
+        payload = {"messages": inputs}
+        response = requests.post(
+            f"https://api.cloudflare.com/client/v4/accounts/{self.config['cf_account_id']}/ai/run/{model}",
+            headers=headers,
+            json=payload,
+        )
         return response.json()
 
     # 用AI总结Thread
@@ -250,7 +254,7 @@ class ForumMonitor:
             pub_date = item.find('pubDate').text
             creator = item.find('dc:creator').text
 
-@@ -217,68 +263,159 @@ class ForumMonitor:
+@@ -217,116 +267,209 @@ class ForumMonitor:
 
             self.handle_thread(thread_data)
 
@@ -410,7 +414,9 @@ class ForumMonitor:
             content = discussion_div.find('div', {'class': 'Message userContent'}).text.strip()
             publish_time = discussion_div.find('span', {'class': 'MItem DateCreated'}).find('time')['datetime']
 
-@@ -288,45 +425,47 @@ class ForumMonitor:
+            thread_data = {
+                'cate': 'les',
+                'title': title,
                 'creator': creator,
                 'link': link,
                 'description': content,
@@ -433,11 +439,11 @@ class ForumMonitor:
 
         while True:
             if debug:
-                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始遍历...")
-                    self.check_let()  # 检查 RSS
-                    self.check_les()
-                    self.check_custom_threads()
-                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 遍历完成...")
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始遍历...")
+                self.check_let()  # 检查 RSS
+                self.check_les()
+                self.check_custom_threads()
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 遍历完成...")
             else:
                 try:
                     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始遍历...")
