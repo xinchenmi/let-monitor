@@ -15,7 +15,7 @@ scraper = cfscrape.create_scraper()  # returns a CloudflareScraper instance
 
 
 class ForumMonitor:
-    def __init__(self, config_path='data/config.json'):
+   def __init__(self, config_path='data/config.json'):
         self.config_path = config_path
         self.proxy_host = os.getenv("PROXY_HOST", None)  # 从环境变量读取代理配置
         self.mongo_host = os.getenv("MONGO_HOST", 'mongodb://localhost:27017/')  # 从环境变量读取代理配置
@@ -40,14 +40,17 @@ class ForumMonitor:
             # 检查配置文件是否存在
             if not os.path.exists(self.config_path):
                 print(f"{self.config_path} 不存在，复制到 {self.config_path}")
+                os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
                 shutil.copy('example.json', self.config_path)
             with open(self.config_path, 'r') as f:
                 self.config = json.load(f)['config']
+                self.config.setdefault('custom_threads', [])
                 self.notifier = NotificationSender(self.config_path)  # 创建通知发送器
             print("配置文件加载成功")
         except Exception as e:
             print(f"加载配置失败: {e}")
             self.config = {}
+            self.config.setdefault('custom_threads', [])
 
     def workers_ai_run(self, model, inputs):
         headers = {"Authorization": f"Bearer {self.config['cf_token']}"}
@@ -85,8 +88,14 @@ class ForumMonitor:
 
         if not existing_thread:
             # 存储 RSS 线程到 MongoDB
+            thread_record = thread_data.copy()
+            thread_record.pop('skip_initial_notification', None)
+            thread_record.pop('monitor_all_authors', None)
+            thread_record.pop('allowed_authors', None)
+            thread_record.pop('use_ai_filter', None)
+            thread_record.pop('custom_name', None)
 
-            self.threads_collection.insert_one(thread_data)  # 仅当线程不存在时插入
+            self.threads_collection.insert_one(thread_record)  # 仅当线程不存在时插入
 
             print(f"线程已存储: {thread_data['title']}, 链接: {thread_data['link']}")
 
@@ -94,7 +103,7 @@ class ForumMonitor:
             time_diff = datetime.utcnow() - thread_data['pub_date']
 
             # 如果文章发布时间在当前时间的一天内，则发送通知
-            if time_diff.total_seconds() <= 24 * 60 * 60:  # 24小时以内
+            if time_diff.total_seconds() <= 24 * 60 * 60 and not thread_data.get('skip_initial_notification', False):  # 24小时以内
                 # 格式化发布时间为所需格式
                 formatted_pub_date = thread_data['pub_date'].strftime("%Y/%m/%d %H:%M")
                 
@@ -120,12 +129,17 @@ class ForumMonitor:
     # 获取线程所有页面的评论
     def fetch_comments(self, thread_data):
         thread_info = self.threads_collection.find_one({'link': thread_data['link']})
+        last_page = thread_data.get('last_page', 1)
         if thread_info:
-            last_page = thread_info.get('last_page', 1)
+            last_page = thread_info.get('last_page', last_page)
         while True:
             # 不同类型可能要考虑不同构建
             if thread_data['cate'] == 'let' or thread_data['cate'] == 'les':
-                page_url = f"{thread_data['link']})/p{last_page}"  # 拼接分页 URL
+                base_url = thread_data['link'].split('#')[0].rstrip(')')
+                if last_page <= 1:
+                    page_url = base_url
+                else:
+                    page_url = f"{base_url}/p{last_page}"
 
             response = scraper.get(page_url)
             if response.status_code == 200:
@@ -157,28 +171,60 @@ class ForumMonitor:
             )
 
             time_diff = datetime.utcnow() - comment_data['created_at']
+
+            monitor_all = thread_data.get('monitor_all_authors', False)
+            allowed_authors = thread_data.get('allowed_authors') or []
+            creator = thread_data.get('creator')
+
+            author_matches = False
+            if monitor_all:
+                author_matches = True
+            elif allowed_authors:
+                author_matches = comment_data['author'] in allowed_authors
+            elif creator:
+                author_matches = comment_data['author'] == creator
+            else:
+                author_matches = True
+
             # 如果文章发布时间在当前时间的一天内，则发送通知
-            if time_diff.total_seconds() <= 24 * 60 * 60 and comment_data['author'] == thread_data['creator']:  # 24小时以内
+            if time_diff.total_seconds() <= 24 * 60 * 60 and author_matches:  # 24小时以内
                 print(comment_data['message'])
-                ai_response = self.get_filter_from_ai(comment_data['message'])
-                print(ai_response)
-                if not "FALSE" in ai_response:
-                    # 格式化发布时间为所需格式
-                    formatted_pub_date = comment_data['created_at'].strftime("%Y/%m/%d %H:%M")
-    
-                    # 创建消息内容
-                    message = (
-                        f"{thread_data['cate'].upper()} 新评论\n"
-                        f"作者：{comment_data['author']}\n"  # 如果有作者信息，可替换 '未知' 为实际值
-                        f"发布时间：{formatted_pub_date}\n\n"
-                        f"{comment_data['message'][:200]}...\n"
-                        f"{ai_response[:200]}...\n\n"
-                        f"{comment_data['url']}"
-                    )
-    
-                    self.notifier.send_message(message)
-                else:
-                    print(f'AI skip {comment_data["message"]}')
+
+                should_use_ai = thread_data.get('use_ai_filter', True)
+                ai_response = None
+                if should_use_ai:
+                    ai_response = self.get_filter_from_ai(comment_data['message'])
+                    print(ai_response)
+                    if "FALSE" in ai_response:
+                        print(f"AI skip {comment_data['message']}")
+                        return
+
+                # 格式化发布时间为所需格式
+                formatted_pub_date = comment_data['created_at'].strftime("%Y/%m/%d %H:%M")
+
+                thread_title = thread_data.get('custom_name') or thread_data.get('title', '未知')
+
+                comment_preview = comment_data['message']
+                ai_preview = None
+                if ai_response:
+                    ai_preview = ai_response if len(ai_response) <= 200 else f"{ai_response[:200]}..."
+
+                message_lines = [
+                    f"{thread_data.get('cate', 'let').upper()} 新评论",
+                    f"主题：{thread_title}",
+                    f"作者：{comment_data['author']}",
+                    f"发布时间：{formatted_pub_date}",
+                    "",
+                    comment_preview
+                ]
+
+                if ai_preview:
+                    message_lines.append(ai_preview)
+
+                message_lines.extend(["", comment_data['url']])
+                message = "\n".join(message_lines)
+
+                self.notifier.send_message(message)
 
     # 检查 RSS
     def check_let(self, url = "https://lowendtalk.com/categories/offers/feed.rss"):
@@ -204,16 +250,7 @@ class ForumMonitor:
             pub_date = item.find('pubDate').text
             creator = item.find('dc:creator').text
 
-            thread_data = {
-                'cate': 'let',
-                'title': title,
-                'link': link,
-                'description': description,
-                'pub_date': datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S +0000"),
-                'created_at': datetime.utcnow(),
-                'creator': creator,
-                'last_page': 1  # 默认从第一页开始抓取
-            }
+@@ -217,68 +263,159 @@ class ForumMonitor:
 
             self.handle_thread(thread_data)
 
@@ -239,9 +276,21 @@ class ForumMonitor:
             author = comment.find('a', class_='Username').text
             message = comment.find('div', class_='Message').text.strip()
             created_at = comment.find('time')['datetime']
-            
-            if not author == thread_data['creator'] or comment.find('div',class_="QuoteText"):
+
+            if comment.find('div', class_="QuoteText"):
                 continue
+
+            monitor_all = thread_data.get('monitor_all_authors', False)
+            allowed_authors = thread_data.get('allowed_authors') or []
+            creator = thread_data.get('creator')
+
+            if not monitor_all:
+                if allowed_authors:
+                    if author not in allowed_authors:
+                        continue
+                elif creator:
+                    if author != creator:
+                        continue
 
             comment_data = {
                     'comment_id': f'{thread_data["cate"]}_{comment_id}',  # 使用 comment_id 作为唯一标识符
@@ -256,6 +305,85 @@ class ForumMonitor:
                 }
             
             self.handle_comment(comment_data, thread_data)
+
+    def check_custom_threads(self):
+        custom_threads = self.config.get('custom_threads', [])
+        if not custom_threads:
+            return
+
+        print("正在检查自定义 LET 线程")
+        for thread_cfg in custom_threads:
+            url = thread_cfg.get('url')
+            if not url:
+                continue
+
+            try:
+                response = scraper.get(url)
+            except Exception as e:
+                print(f"无法获取自定义线程 {url}: {e}")
+                continue
+
+            if response.status_code != 200:
+                print(f"无法获取自定义线程 {url}: {response.status_code}")
+                continue
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            title_element = soup.find('h1', class_='DiscussionTitle') or soup.find('h1')
+            title = title_element.text.strip() if title_element else thread_cfg.get('name', url)
+
+            allowed_authors = []
+            author_config = thread_cfg.get('author')
+            if isinstance(author_config, str):
+                allowed_authors = [a.strip() for a in author_config.split(',') if a.strip()]
+            elif isinstance(author_config, list):
+                allowed_authors = [str(a).strip() for a in author_config if str(a).strip()]
+
+            if allowed_authors:
+                allowed_authors = list(dict.fromkeys(allowed_authors))
+
+            monitor_all_authors = thread_cfg.get('monitor_all_authors')
+            if monitor_all_authors is None:
+                monitor_all_authors = not bool(allowed_authors)
+
+            creator = None
+            creator_element = soup.find('span', class_='DiscussionAuthor')
+            if creator_element:
+                username_link = creator_element.find('a', class_='Username')
+                if username_link and username_link.text:
+                    creator = username_link.text.strip()
+                elif creator_element.text:
+                    creator = creator_element.text.strip()
+
+            if not creator and allowed_authors:
+                creator = allowed_authors[0]
+
+            discussion_div = soup.find('div', {'class': 'Discussion'})
+            description_element = None
+            if discussion_div:
+                description_element = discussion_div.find('div', class_='Message')
+            if not description_element:
+                description_element = soup.find('div', class_='Message')
+            description = description_element.text.strip() if description_element else ''
+
+            thread_data = {
+                'cate': thread_cfg.get('cate', 'let'),
+                'title': title,
+                'link': url,
+                'description': description,
+                'pub_date': datetime.utcnow(),
+                'created_at': datetime.utcnow(),
+                'creator': creator,
+                'last_page': 1,
+                'skip_initial_notification': True,
+                'monitor_all_authors': monitor_all_authors,
+                'allowed_authors': allowed_authors,
+                'use_ai_filter': thread_cfg.get('use_ai_filter', True),
+                'custom_name': thread_cfg.get('name', title)
+            }
+
+            self.handle_thread(thread_data)
+            self.fetch_comments(thread_data)
 
     def check_les(self,url = 'https://lowendspirit.com/categories/offers'):
         response = requests.get(url)
@@ -282,9 +410,7 @@ class ForumMonitor:
             content = discussion_div.find('div', {'class': 'Message userContent'}).text.strip()
             publish_time = discussion_div.find('span', {'class': 'MItem DateCreated'}).find('time')['datetime']
 
-            thread_data = {
-                'cate': 'les',
-                'title': title,
+@@ -288,45 +425,47 @@ class ForumMonitor:
                 'creator': creator,
                 'link': link,
                 'description': content,
@@ -310,12 +436,14 @@ class ForumMonitor:
                     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始遍历...")
                     self.check_let()  # 检查 RSS
                     self.check_les()
+                    self.check_custom_threads()
                     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 遍历完成...")
             else:
                 try:
                     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始遍历...")
                     self.check_let()  # 检查 RSS
                     self.check_les()
+                    self.check_custom_threads()
                     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 遍历完成...")
                 except Exception as e:
                     print(f"检测过程出现错误: {e}")
