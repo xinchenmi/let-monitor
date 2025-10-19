@@ -19,8 +19,8 @@ AI 需要调校，可能会输出预期以外的结果。
 
 由于需要配置数据库，建议使用 `docker-compose` 安装
 
-```bash
-git clone https://github.com/vpslog/let-monitor/
+```bas
+git clone https://github.com/xinchenmi/let-monitor.git
 cd let-monitor
 # nano docker-compose.yml 修改密码
 docker compose up --build -d
