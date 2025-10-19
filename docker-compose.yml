@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: let-monitor:local  # 本地构建镜像，包含修改后的代码
+    image: let-monitor:local  # 本地构建镜像，包含你修改后的代码
     volumes:
       - ./data:/app/data
     environment:
