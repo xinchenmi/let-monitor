@@ -1,6 +1,7 @@
 services:
-  app:
-    image: vpslog/let-monitor  # 替换为你的应用容器
+    build:
+      context: .
+    image: let-monitor:local  # 本地构建镜像，包含修改后的代码
     volumes:
       - ./let-monitor:/app/data 
     environment:
